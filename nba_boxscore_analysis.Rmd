@@ -1,0 +1,674 @@
+---
+title: 'NBA box score analysis'
+output: html_document
+author: "Serdar Altok"
+date: "`r format(Sys.Date(), '%m/%d/%y')`"
+---
+
+```{r set options, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{css styling, echo=FALSE}
+
+<style>
+.tocify {
+max-width: 175px;
+}
+</style>
+
+<style>
+.main-container {
+width: 100%;
+max-width: 940px;
+margin-left: 250px;
+margin-right: auto;
+}
+</style>
+
+<style>
+.red-header {
+  color: red;
+}
+</style>
+
+```
+
+
+
+# Introduction
+
+In this project, I will explore some stats of interest derived from nba box score data and build a model for playoff success. My goal is to identify factors that can be improved upon team building and player development, rather than guess the number of wins. 
+
+## Setup and Data
+
+```{r load data, message = F, warning = F}
+library(tidyverse)
+
+player_data <- read_csv("player_game_data.csv")
+team_data <- read_csv("team_game_data.csv")
+```
+
+```{r}
+
+# split team data to regular season and playoff
+team_reg <- team_data %>% filter(gametype == 2)
+team_playoff <- team_data %>% filter(gametype == 4)
+
+```
+
+## Calculate advanced stats
+
+```{r}
+
+# Formulas for advanced stats
+
+# effective field goal percentage (eFG)
+calc_efg <- function(fgm, fgm3, fga) {
+  efg <- (fgm + 0.5 * fgm3) / fga * 100
+  return(round(efg, 1))
+}
+
+# points per attempt (ppa)
+calc_ppa <- function(shotattemptpoints, shotattempts) {
+  return(round(shotattemptpoints/shotattempts, 1))
+}
+
+# asssist percentage (assist_pct)
+calc_assist_pct <- function(assists, fgm) {
+  return(round(100*(assists / fgm), 1))
+}
+
+# turnover percentage (tov_pct)
+calc_tov_pct <- function(turnovers, shotsattempts) {
+  return(round(100*(turnovers / (turnovers + shotsattempts)), 1))
+}
+
+# defensive rebound percentage (dreb_pct)
+calc_dreb_pct <- function(def_rebdefensive, def_reboundchance) {
+  return(round(100*(def_rebdefensive / def_reboundchance), 1))
+}
+
+# offensive rebound percentage (oreb_pct)
+calc_oreb_pct <- function(reboffensive, reboundchance) {
+  return(round(100*(reboffensive / reboundchance), 1))
+}
+
+# steal percentage (steal_pct)
+calc_steal_pct <- function(steals, def_possessions) {
+  return(round(100*(steals / def_possessions), 1))
+}
+
+# block percentage (block_pct)
+calc_block_pct <- function(blocks, def_fg2attempted) {
+  return(round(100*(blocks / def_fg2attempted), 1))
+}
+
+```
+
+```{r}
+# Add defensive stats
+
+info_cols <- c('nbagameid', 'off_team', 'def_team')
+def_stats <- c('points', 'fg2attempted', 'possessions', 'rebdefensive', 'reboundchance', 'reboffensive', 'stealsagainst', 'blocksagainst', 'fgmade', 'fg3made', 'fgattempted')
+
+team_reg_defensive <- team_reg %>%
+  select(all_of(c(info_cols, def_stats))) %>%
+  rename(def_points = points,
+         def_fgmade = fgmade, 
+         def_fg3made = fg3made,
+         def_fgattempted = fgattempted,
+         def_fg2attempted = fg2attempted,
+         def_possessions = possessions,
+         def_reboffensive = reboffensive,
+         def_rebdefensive = rebdefensive,
+         def_reboundchance = reboundchance,
+         steals = stealsagainst,
+         blocks = blocksagainst
+         )
+
+# after joining the defensive stats, the def_ prefix indicates that these are the defensive stats of the offensive team, i.e. when they are on defense
+
+team_reg <- team_reg %>% 
+  inner_join(team_reg_defensive, 
+             by=c('nbagameid'='nbagameid', 
+                  'off_team'='def_team', 
+                  'def_team'='off_team'))
+```
+
+```{r}
+
+# Add eFG and def_eFG stats
+
+team_reg <- team_reg %>%
+  mutate(
+    eFG = calc_efg(fgmade, fg3made, fgattempted),
+    def_eFG = calc_efg(def_fgmade, def_fg3made, def_fgattempted))
+
+# Add differential stats
+team_reg <- team_reg %>% 
+  mutate(diff_points = points - def_points,
+         diff_reboffensive = reboffensive - def_reboffensive,
+         diff_possessions = possessions - def_possessions,
+         diff_eFG = eFG - def_eFG
+         )
+```
+
+```{r}
+
+# keep relevant columns and calculate totals
+
+stats_summed <- c('shotattemptpoints', 'shotattempts', 
+                  'points', 'def_points', 'possessions', 'def_possessions',
+                  'fgmade','fg3made','fgattempted',
+                  'def_fgmade', 'def_fg3made', 'def_fgattempted',
+                  'assists' , 'steals', 'blocks', 'turnovers',
+                  'def_possessions', 'def_fg2attempted',
+                  'reboffensive', 'reboundchance', 
+                  'def_rebdefensive', 'def_reboundchance')
+diff_stats <- c( "diff_possessions", "diff_eFG")
+
+# calculate offensive and defensive totals, means
+team_reg_totals <- team_reg %>%
+  group_by(season, off_team) %>%
+  summarize(
+    across(all_of(stats_summed), sum),
+    across(all_of(c('off_win', diff_stats)), mean),
+    .groups = 'drop'
+  )
+
+# Calculate advanced stats
+
+team_reg_totals <- team_reg_totals %>%
+  mutate(
+    win_pct = off_win,
+    eFG = calc_efg(fgmade, fg3made, fgattempted),
+    def_eFG = calc_efg(def_fgmade, def_fg3made, def_fgattempted),
+    ppa = calc_ppa(shotattemptpoints, shotattempts),
+    assist_pct = calc_assist_pct(assists , fgmade),
+    steal_pct = calc_steal_pct(steals, def_possessions) ,
+    block_pct = calc_block_pct(blocks , def_fg2attempted),
+    tov_pct = calc_tov_pct(turnovers, shotattempts),
+    oreb_pct = calc_oreb_pct(reboffensive, reboundchance),
+    dreb_pct = calc_dreb_pct(def_rebdefensive, def_reboundchance)
+  )
+
+```
+
+```{r}
+
+# Offensive eFG for Golden State Warriors
+print(paste('GSW offensive eFG% in 2015-2016 regular season is', 
+            team_reg_totals %>%
+              filter(season == 2015, off_team == 'GSW') %>%
+              pull(eFG)))
+
+# Defensive eFG for Golden State Warriors
+print(paste('GSW defensive eFG% in 2015-2016 regular season is', 
+            team_reg_totals %>%
+              filter(season == 2015, off_team == 'GSW') %>%
+              pull(def_eFG)))
+
+```
+
+## Win frequency of the team with higher EFG%
+
+```{r}
+# each game is counted twice, won't effect percentages
+
+# team with better eFG wins if the signs of points_diff and eFG_diff are same
+higher_eff_wins_pct <- team_reg %>%
+  filter(diff_eFG != 0) %>%
+  mutate(p = (diff_points > 0) == (diff_eFG > 0)) %>%
+  summarise(win_pct = mean(p)) %>%
+  pull(win_pct)
+
+# Print the result rounded to 1 decimal place
+print(round(100 * higher_eff_wins_pct, 1))
+```
+
+## Win frequency of the team with more offensive rebounds
+
+```{r}
+
+# Calculate the percentage where the signs of diff_points and diff_reboffensive are the same
+higher_reboff_win_pct <-  team_reg %>%
+  filter(diff_reboffensive != 0) %>%
+  mutate(p = (diff_points > 0) == (diff_reboffensive > 0)) %>%
+  summarise(win_pct = mean(p)) %>%
+  pull(win_pct)
+
+# Print the result rounded to 1 decimal place
+print(round(100*higher_reboff_win_pct, 1))
+
+```
+
+
+Number of offensive rebounds do not carry any direct information about how well a team is scoring. Some teams missing more shots (a poor offensive performance) migtht be getting more opportunities for an offensive rebound. Or some teams may be chasing offensive rebounds at the cost of conceding more points in transition.
+
+On the other hand, eFG% tells us which team is scoring at a higher rate, which is directly related to the final score. It is also a function of one team's offense and the other team's defense, giving info about both teams' main functions. It doesn't measure free throws or number of extra possessions of one team but is much more informative than the number of offensive rebounds.
+
+## Percentage of games players are available
+
+```{r}
+# Add flags for whether player played in the game and whether he is available
+player_data <- player_data %>%
+  mutate(played = seconds > 0,
+         available = 1 - missed)
+
+# Split player data into regular season and playoff games
+player_reg <- player_data %>%
+  filter(gametype == 2)
+
+player_playoff <- player_data %>%
+  filter(gametype == 4)
+
+# Calculate regular season totals for games played, points, and percentage of available games
+player_availablity <- player_reg %>%
+  group_by(season, player_name) %>%
+  summarise(available_pct = mean(available),
+            total_points = sum(points),
+            total_played = sum(played)) %>%
+  ungroup() %>%
+  mutate(ppg = total_points / total_played)
+
+# Apply the constraints
+available_pct <- player_availablity %>%
+  filter(ppg >= 25, available_pct >= 0.25) %>%
+  summarise(mean_available_pct = mean(available_pct),
+            .groups = 'drop') %>%
+  pull(mean_available_pct)
+
+# Calculate the mean available game percentage per season
+print(paste0("Mean available game percentage per season: ", 
+            round(100 * available_pct, 1),
+            "%"))
+
+```
+
+**Notes:**
+
+-   I took the average of seasonal availability percentages. Since some seasons have different number of games, the result would be slightly different if I calculated total number of games available/total number of games.
+-   I used games in the player game data to calculate availability percentages. For two players (Kyrie Irving and Bradley Beal 2019 season) the number of listed games is less than the number of games their teams played. If the number of games the team played is used, the result would be slightly different.
+
+## home court team winning percentage in playoffs by round
+
+```{r}
+# split playoff data
+team_playoff <- team_data %>% filter(gametype == 4)
+
+# Sort by gamedate to identify first and last games of a playoff series
+team_playoff <- team_playoff %>% 
+  arrange(gamedate)
+
+# Keep one row for each game, and keep relevant columns
+team_playoff <- team_playoff %>% 
+  distinct(nbagameid, .keep_all = TRUE) %>% 
+  select(season, nbagameid, gamedate, off_team, def_team, off_home, off_win)
+
+# Create a new column for playoff series name containing team names and year
+team_playoff <- team_playoff %>% 
+  rowwise() %>% 
+  mutate(series_name = paste0(sort(c(off_team, def_team)), collapse = "") %>% paste0(season)) %>% 
+  ungroup()
+
+# Create a column for the winning team name for each game
+team_playoff <- team_playoff %>% 
+  mutate(winner = ifelse(off_win == 1, off_team, def_team))
+
+# Use first games to identify home court advantage and rounds
+first_games <- team_playoff %>% 
+  distinct(series_name, .keep_all = TRUE)
+
+# The first 8 games of each playoff are Round 1, next 4 are Round 2, next 2 are Conference Finals, next one is Finals
+rounds_season <- c(rep("Round 1", 8), rep("Round 2", 4), rep("Conference Finals", 2), "Finals")
+first_games$Round <- rep(rounds_season, 19)
+
+# Home side on the first game has home court advantage
+first_games <- first_games %>% 
+  mutate(home_court_advantage = ifelse(off_home == 1, off_team, def_team))
+
+# Summarize info
+playoff_summary <- first_games %>%
+  select(series_name, season, off_team, def_team, Round, home_court_advantage)
+
+# Winner of the last game is the series winner
+series_winners <- team_playoff %>% 
+  group_by(series_name) %>% 
+  slice_tail(n = 1) %>%  # Select the last row of each group
+  ungroup() %>% 
+  select(series_name, series_winner = winner)
+
+# Add series winners to the summary
+playoff_summary <- playoff_summary %>% 
+  left_join(series_winners, by = "series_name")
+
+# Check whether home team wins
+playoff_summary <- playoff_summary %>% 
+  mutate(home_court_ad_wins = home_court_advantage == series_winner)
+
+# Report the average number of wins per round between 2014-2023
+playoff_summary %>%
+  filter(season %in% 2014:2023) %>%
+  group_by(Round) %>%
+  summarise(win_pct = round(mean(home_court_ad_wins) * 100, 1))
+
+```
+
+
+
+## Percentage of teams with +5 or more net rating that made the second round in the playoffs the following season
+
+### Teams with +5 or more net rating
+
+```{r}
+
+# calculate offensive, defensive and net ratings
+
+calc_rtg <- function(points, possessions) {
+  return(round(100 * points / possessions, 2))
+}
+
+team_reg_totals <- team_reg_totals %>% 
+  mutate(ORTG = calc_rtg(points, possessions),
+         DRTG = calc_rtg(def_points, def_possessions),
+         netRTG = ORTG - DRTG) %>%
+  ungroup()
+
+# take the teams with net rating >= 5
+teams_plus5_net_rtg <- team_reg_totals %>%
+  filter(netRTG >= 5)
+
+```
+
+### Teams that make 2nd round
+
+```{r}
+# Split playoff summary to two, one for off teams, one for def teams
+
+playoff_off_teams <- playoff_summary[c('season', 'off_team', 'Round', 'series_name')]
+
+playoff_def_teams <- playoff_summary[c('season', 'def_team', 'Round', 'series_name')] %>%
+  rename(off_team=def_team)
+
+# Combine the two and filter for Round 2
+round2_teams <- rbind(playoff_off_teams, playoff_def_teams) %>%
+  rename(playoff_season=season) %>%
+  filter(Round=='Round 2')
+
+# Define playoff season in teams_plus5_net_rtg
+teams_plus5_net_rtg <- teams_plus5_net_rtg %>% 
+  mutate(playoff_season = season + 1)
+
+# Find the teams that are +5 net rating and in 2nd round the following year
+round2_teams_plus5_net_rtg <- inner_join(round2_teams,
+                                         teams_plus5_net_rtg,
+                                         by = c("playoff_season", "off_team"))
+
+# Calculate the percentage
+second_round_pct <-
+  round(100 * nrow(round2_teams_plus5_net_rtg) / nrow(teams_plus5_net_rtg),
+        1)
+
+print(
+  paste(
+    "Percentage of teams with +5 or more net rating that made the second round",
+    "in the playoffs the following season is",
+    second_round_pct
+  )
+)
+
+```
+
+## Percentage of players with top five minutes who played in round 2 of playoffs next year
+
+### top 5 players from each team with most minutes in regular season
+
+```{r}
+
+# Get minute data in regular season games
+player_min_reg <- player_data %>%
+  filter(gametype == 2 & season %in% 2014:2021) %>%
+  select(season, team, player_name, seconds)
+
+# Calculate total for time played
+player_min_totals <- player_min_reg %>%
+  group_by(season, team, player_name) %>%
+  summarise(total_secs = sum(seconds), .groups='drop')
+
+# Get top 5 players for each season team combination
+player_min_top_5 <- player_min_totals %>%
+  arrange(desc(total_secs)) %>%
+  group_by(season, team, .groups='drop') %>%
+  slice_head(n = 5) %>%
+  ungroup()
+
+# Create column to merge with playoff data
+player_min_top_5 <- player_min_top_5 %>%
+  mutate(playoff_season = season + 1)
+
+# Merge with playoff data for the following year
+player_min_top_5 <- player_min_top_5 %>%
+  inner_join(round2_teams_plus5_net_rtg, by = c("playoff_season", "team" = "off_team"))
+  
+```
+
+### find the players who played in round 2
+
+```{r}
+
+# Create a new column for playoff series name containing team names and year
+player_playoff <- player_playoff %>%
+  rowwise() %>%
+  mutate(series_name = paste0(sort(c(team, opp_team)), collapse = "") %>% paste0(season)) %>%
+  ungroup()
+ 
+# Find players who played in the playoffs, with total seconds > 0
+qualified_players <- player_playoff %>%
+  group_by(series_name, player_name, team) %>%
+  summarise(total_time = sum(seconds), .groups='drop') %>%
+  filter(total_time > 0) %>%
+  inner_join(player_min_top_5, by = c("series_name", "player_name", "team")) %>%
+  arrange(series_name)
+
+qualified_players_pct <- round(100 * nrow(qualified_players) / nrow(player_min_top_5), 1)
+
+print(
+  paste(
+    "Percentage of players with top five minutes who played in round 2 of playoffs next year is",
+    qualified_players_pct
+  )
+)
+
+```
+
+
+## Playoffs Series Modeling
+
+
+```{r}
+library(glmnet)
+
+model_vars = c("eFG", "def_eFG", 'assist_pct', 
+                "steal_pct",  "tov_pct", "oreb_pct", "dreb_pct", 'block_pct')
+
+target <- 'win_pct'
+team_info <- c('season', 'off_team')
+
+# add reg season totals to model and take competitive teams
+model_data <- team_reg_totals %>%
+  select(all_of(c(team_info, model_vars, target))) %>%
+  filter(win_pct >= .40, season %in% 2014:2022)
+
+X <- as.matrix(model_data[, model_vars])
+y <- model_data$win_pct
+
+lasso_model <- cv.glmnet(X, y, alpha = 1)
+
+# Add predictions to model_data
+predictions <- predict(lasso_model, newx = X, s = 'lambda.min')
+model_data$pred_win_pct <- as.vector(predictions) %>% round(2)
+
+```
+
+```{r}
+
+# (Intercept) -0.088814061
+# eFG          0.046288911
+# def_eFG     -0.045708354
+# assist_pct  -0.001714749
+# steal_pct    0.042897558
+# tov_pct     -0.036113247
+# oreb_pct     0.009297308
+# dreb_pct     0.008733526
+# block_pct   -0.009524545
+
+```
+
+```{r}
+
+# Calculate results
+
+# get relevant playoff data
+playoff_m <- playoff_summary %>%
+  filter(season %in% 2014:2022) %>%
+  select(all_of(c(
+    "season", "off_team", "def_team", "Round", 'series_winner'
+  )))
+
+# add win percentages to playoff data
+playoff_m <- playoff_m %>%
+  inner_join(model_data[, c('season', 'off_team', 'pred_win_pct')], 
+             by = c('season', 'off_team')) %>%
+  rename(off_win_pct = pred_win_pct) %>%
+  inner_join(model_data[, c('season', 'off_team', 'pred_win_pct')], 
+             by = c('season', 'def_team' = 'off_team')) %>%
+  rename(def_win_pct = pred_win_pct)
+
+# normalize probabilities for each series
+
+playoff_m <- playoff_m %>%
+  mutate(p_total = off_win_pct + def_win_pct, 
+         off_win_pct = off_win_pct/p_total,
+         def_win_pct = def_win_pct/p_total) %>%
+  select(-p_total)
+
+# Add probabilities for possible series results
+calc_score_prob <- function(p, total_games) {
+  if (total_games == 4) {
+    return(p ^ 4)
+  } else if (total_games == 5) {
+    return(p ^ 4 * (1 - p) * 4)
+  } else if (total_games == 6) {
+    return(p ^ 4 * (1 - p) ^ 2 * 10)
+  } else if (total_games == 7) {
+    return(p ^ 4 * (1 - p) ^ 3 * 20)
+  }
+}
+
+playoff_m <- playoff_m %>%
+  mutate(
+    off_in_4 = calc_score_prob(off_win_pct, 4),
+    off_in_5 = calc_score_prob(off_win_pct, 5),
+    off_in_6 = calc_score_prob(off_win_pct, 6),
+    off_in_7 = calc_score_prob(off_win_pct, 7),
+    def_in_4 = calc_score_prob(def_win_pct, 4),
+    def_in_5 = calc_score_prob(def_win_pct, 5),
+    def_in_6 = calc_score_prob(def_win_pct, 6),
+    def_in_7 = calc_score_prob(def_win_pct, 7),
+    off_advances = off_in_4 + off_in_5 + off_in_6 + off_in_7,
+    def_advances = def_in_4 + def_in_5 + def_in_6 + def_in_7
+  ) %>%
+  mutate(across(6:17, ~round(.x, 2)))
+
+
+final_output <- playoff_m %>% select(-c('off_win_pct', 'def_win_pct'))
+
+
+```
+
+## Model Overview
+
+I used a linear model to predict win percentage of teams for the regular season based on a number of advanced stats. These win percentages are then used as an estimate of each team's winning probability of each game during a playoff series. The probabilities of all possible series results and each team advancing are calculated using the estimates on individual games. 
+
+Some notable insights from the results are:
+
+- Increasing offensive efficiency and decreasing opponents offensive efficiency has a similar impact
+- Similarly defensive rebounds and offensive rebound efficiency has similar impact
+- No meaningful relationship between assist percentage and number of wins
+- Block percentage has a negative association with number of wins. This should be further investigated.
+
+### Strengths of the model
+
+- The contribution of each considered stat to the final winning percentage is easily interpreted helping ease decision making 
+- The results can be understood by a wide audience.
+- Estimates the probabilities for each game rather than estimating than estimating the results of the series
+
+### Weaknesses of the model
+
+- The assumption that regular season winning percentage is a good estimate of the winning percentage of each game during the playoffs is not verified
+- The model uses a small number of advanced stats.
+- The model doesn't provide any estimate of the advanced stats against a specific opponent in the playoffs
+- No component that measures the team's recent form before the playoffs
+
+### Possible improvements
+
+- Using playoff data from previous years, a separate model can be fit to estimate the winning probabilities in a playoff game from the winning percentages during regular season
+- We can work with more stats, find their contributions to the winning percentage and explore how they are related to the other stats
+- Another component to the estimate of the win probability can be added using stats from more recent games to represent a contribution of recent form
+
+### 2023-24 playoff results estimation
+
+```{r}
+
+reg_2023 <- team_reg_totals %>%
+  select(all_of(c(team_info, model_vars))) %>%
+  filter(season == 2023)
+
+X <- as.matrix(reg_2023[, model_vars])
+
+predictions <- predict(lasso_model, newx = X, s = 'lambda.min')
+reg_2023$pred_win_pct <- as.vector(predictions) %>% round(2)
+
+# create playoff data for 2023
+
+playoff_2023 <- tibble(
+  off_team = c("OKC", "BOS", "DEN", "MIN", "PHI", "LAC", "CLE", "MIL"),
+  def_team = c("NOP", "MIA", "LAL", "PHX", "NYK", "DAL", "ORL", "IND")
+)
+
+# add win percentages to 2023 playoff data
+playoff_2023 <- playoff_2023 %>%
+  inner_join(reg_2023[, c('off_team', 'pred_win_pct')], 
+             by = 'off_team') %>%
+  rename(off_win_pct = pred_win_pct) %>%
+  inner_join(reg_2023[, c('off_team', 'pred_win_pct')], 
+             by = c('def_team' = 'off_team')) %>%
+  rename(def_win_pct = pred_win_pct)
+
+playoff_2023 <- playoff_2023 %>%
+  mutate(p_total = off_win_pct + def_win_pct, 
+         off_win_pct = off_win_pct/p_total,
+         def_win_pct = def_win_pct/p_total) %>%
+  select(-p_total)
+
+playoff_2023 <- playoff_2023 %>%
+  mutate(
+    off_in_4 = calc_score_prob(off_win_pct, 4),
+    off_in_5 = calc_score_prob(off_win_pct, 5),
+    off_in_6 = calc_score_prob(off_win_pct, 6),
+    off_in_7 = calc_score_prob(off_win_pct, 7),
+    def_in_4 = calc_score_prob(def_win_pct, 4),
+    def_in_5 = calc_score_prob(def_win_pct, 5),
+    def_in_6 = calc_score_prob(def_win_pct, 6),
+    def_in_7 = calc_score_prob(def_win_pct, 7),
+    off_advances = off_in_4 + off_in_5 + off_in_6 + off_in_7,
+    def_advances = def_in_4 + def_in_5 + def_in_6 + def_in_7
+  ) %>%
+  mutate(across(5:14, ~round(.x, 2))) %>%
+  select(-c(off_win_pct, def_win_pct))
+
+knitr::kable(playoff_2023)
+
+```
+
